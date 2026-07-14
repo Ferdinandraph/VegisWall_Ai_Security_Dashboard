@@ -31,6 +31,7 @@ export function AnimatedNumber({
 }
 
 // ---- Line chart (latency over time) -----------------------------------------
+
 export function LineChart({
   data,
   height = 200,
@@ -45,14 +46,27 @@ export function LineChart({
   const w = 760;
   const h = height;
   const pad = { l: 36, r: 12, t: 14, b: 22 };
-  const max = Math.max(...data.map((d) => d.p99)) * 1.15;
+
+  // FALLBACK FIX: Provide hard defaults if data parsing returns NaN
+  const cleanData = data && data.length > 0 ? data : [{ latency: 0, p99: 0, label: '' }];
+  
+  const rawMax = Math.max(...cleanData.map((d) => d.p99 || 0));
+  const max = isNaN(rawMax) || rawMax === 0 ? 100 : rawMax * 1.15;
   const min = 0;
-  const x = (i: number) => pad.l + (i / (data.length - 1)) * (w - pad.l - pad.r);
-  const y = (v: number) => pad.t + (1 - (v - min) / (max - min)) * (h - pad.t - pad.b);
+  
+  const x = (i: number) => {
+    const divisor = cleanData.length > 1 ? cleanData.length - 1 : 1;
+    return pad.l + (i / divisor) * (w - pad.l - pad.r);
+  };
+  
+  const y = (v: number) => {
+    const cleanValue = typeof v === 'number' && !isNaN(v) ? v : 0;
+    return pad.t + (1 - (cleanValue - min) / (max - min)) * (h - pad.t - pad.b);
+  };
 
   const linePath = (key: 'latency' | 'p99') =>
-    data.map((d, i) => `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(1)} ${y(d[key]).toFixed(1)}`).join(' ');
-  const areaPath = `${linePath('latency')} L ${x(data.length - 1)} ${h - pad.b} L ${x(0)} ${h - pad.b} Z`;
+    cleanData.map((d, i) => `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(1)} ${y(d[key]).toFixed(1)}`).join(' ');
+  const areaPath = `${linePath('latency')} L ${x(cleanData.length - 1)} ${h - pad.b} L ${x(0)} ${h - pad.b} Z`;
 
   const gridY = [0, 0.25, 0.5, 0.75, 1].map((p) => pad.t + p * (h - pad.t - pad.b));
 
@@ -74,7 +88,7 @@ export function LineChart({
       <path d={linePath('latency')} fill="none" stroke={color} strokeWidth="2.2" strokeLinejoin="round" strokeLinecap="round">
         <animate attributeName="stroke-dasharray" from="0 2000" to="2000 0" dur="1.2s" fill="freeze" />
       </path>
-      {data.map((d, i) =>
+      {cleanData.map((d, i) =>
         i % 6 === 0 ? (
           <text key={i} x={x(i)} y={h - 6} fontSize="9" fill="#5a6478" fontFamily="JetBrains Mono" textAnchor="middle">
             {d.label}
@@ -99,6 +113,7 @@ export function DoughnutChart({
   size?: number;
 }) {
   const total = data.reduce((s, d) => s + d.value, 0);
+  const denominator = total || 1;
   const r = size / 2 - 18;
   const cx = size / 2;
   const cy = size / 2;
@@ -110,7 +125,7 @@ export function DoughnutChart({
       <svg viewBox={`0 0 ${size} ${size}`} style={{ width: size, height: size }}>
         <circle cx={cx} cy={cy} r={r} fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="14" />
         {data.map((d, i) => {
-          const frac = d.value / total;
+          const frac = d.value / denominator;
           const dash = frac * circumference;
           const seg = (
             <circle
@@ -146,7 +161,7 @@ export function DoughnutChart({
             <span className="h-2.5 w-2.5 rounded-sm" style={{ background: d.color, boxShadow: `0 0 8px ${d.color}88` }} />
             <span className="text-ink-200">{d.label}</span>
             <span className="ml-auto font-mono text-ink-300">
-              {d.value} <span className="text-ink-400">({Math.round((d.value / total) * 100)}%)</span>
+              {d.value} <span className="text-ink-400">({Math.round((d.value / denominator) * 100)}%)</span>
             </span>
           </div>
         ))}
@@ -163,7 +178,7 @@ export function BarChart({
   data: { key: string; full: string; safe: number; blocked: number }[];
   height?: number;
 }) {
-  const max = Math.max(...data.map((d) => d.safe + d.blocked));
+  const max = Math.max(1, ...data.map((d) => d.safe + d.blocked));
   return (
     <div className="flex flex-col gap-3" style={{ minHeight: height }}>
       {data.map((d) => {

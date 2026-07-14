@@ -1,5 +1,5 @@
 import { X, ShieldAlert, Fingerprint, Network, Globe, Cpu, Hash, FileJson, CheckCircle2 } from 'lucide-react';
-import type { ThreatRow } from '../data/mock';
+import type { ThreatRow } from '../types/security';
 import { Panel, Eyebrow, VerdictBadge } from './ui';
 import { RadarChart, VectorBar } from './Charts';
 import { useState } from 'react';
@@ -68,7 +68,7 @@ export function PayloadDrawer({ row, onClose }: { row: ThreatRow; onClose: () =>
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
-      <div className="drawerOverlay absolute inset-0" onClick={onClose} />
+      <div className="drawer-overlay absolute inset-0" onClick={onClose} />
       <div className="relative h-full w-full max-w-[560px] animate-slideInRight overflow-y-auto border-l border-white/10 bg-ink-900/95 shadow-2xl backdrop-blur-xl">
         {/* Header */}
         <div className="sticky top-0 z-10 flex items-center gap-3 border-b border-white/8 bg-ink-900/90 px-5 py-4 backdrop-blur-xl">
@@ -219,19 +219,7 @@ function SyntaxJson({ json }: { json: string }) {
   const lines = json.split('\n');
   return (
     <pre className="text-[11.5px] leading-relaxed">
-      {lines.map((line, i) => {
-        const colored = line
-          .replace(/"([^"]+)":/g, '<span style="color:#7c8699">"$1"</span>:')
-          .replace(/: "([^"]+)"/g, ': <span style="color:#10e07a">"$1"</span>')
-          .replace(/: (\d+)/g, ': <span style="color:#ffb627">$1</span>')
-          .replace(/: (true|false|null)/g, ': <span style="color:#1ea8e8">$1</span>');
-        return (
-          <div key={i} className="flex">
-            <span className="mr-3 w-6 select-none text-right text-ink-600">{i + 1}</span>
-            <span dangerouslySetInnerHTML={{ __html: colored }} />
-          </div>
-        );
-      })}
+      {lines.map((line, i) => <div key={i} className="flex"><span className="mr-3 w-6 select-none text-right text-ink-600">{i + 1}</span><span className="text-ink-200">{line}</span></div>)}
     </pre>
   );
 }

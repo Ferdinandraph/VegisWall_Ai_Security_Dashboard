@@ -1,60 +1,44 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { Activity, DollarSign, Gauge, ScanLine, ArrowUpRight, Search } from 'lucide-react';
-import {
-  generateThreatRow,
-  seedThreatRows,
-  type ThreatRow,
-  formatUsd,
-  timeAgo,
-} from '../data/mock';
+import type { DashboardMetrics, ThreatRow } from '../types/security';
+import { formatUsd, timeAgo } from '../services/security';
 import { Panel, Eyebrow, VerdictBadge, FlowBadge } from './ui';
 import { AnimatedNumber } from './Charts';
 import { PayloadDrawer } from './PayloadDrawer';
 
-export function LiveThreatStream() {
-  const [rows, setRows] = useState<ThreatRow[]>(() => seedThreatRows(40));
+export function LiveThreatStream({ rows = [], metrics, loading, configured, error }: { rows: ThreatRow[]; metrics: DashboardMetrics; loading: boolean; configured: boolean; error: string | null }) {
   const [selected, setSelected] = useState<ThreatRow | null>(null);
-  const [revenue, setRevenue] = useState(142.84325);
-  const [scans, setScans] = useState(184_523);
   const [filter, setFilter] = useState<'all' | 'safe' | 'attack'>('all');
   const [query, setQuery] = useState('');
   const [paused, setPaused] = useState(false);
-  const tableRef = useRef<HTMLDivElement>(null);
+  
+  // Guard against uninitialized or partial metrics payloads
+  const revenue = metrics?.totalRevenue ?? 0;
+  const scans = metrics?.totalScans ?? 0;
 
-  // Live stream
-  useEffect(() => {
-    if (paused) return;
-    const tick = setInterval(() => {
-      const newRow = generateThreatRow();
-      setRows((prev) => [newRow, ...prev].slice(0, 80));
-      setRevenue((r) => r + newRow.fee);
-      setScans((s) => s + 1);
-    }, 1800);
-    return () => clearInterval(tick);
-  }, [paused]);
+  const safeRows = Array.isArray(rows) ? rows : [];
 
-  // Revenue ticker (fractional increment)
-  useEffect(() => {
-    const t = setInterval(() => {
-      setRevenue((r) => r + Math.random() * 0.004);
-      setScans((s) => s + Math.floor(Math.random() * 3));
-    }, 420);
-    return () => clearInterval(t);
-  }, []);
-
-  const filtered = rows.filter((r) => {
+  const filtered = safeRows.filter((r) => {
+    if (!r) return false;
     if (filter === 'safe' && r.verdict !== 'SAFE') return false;
     if (filter === 'attack' && r.verdict !== 'ATTACK_SHIELDED') return false;
-    if (query && !r.agentKey.toLowerCase().includes(query.toLowerCase()) && !r.fullKey.toLowerCase().includes(query.toLowerCase())) return false;
+    
+    // Fortified text matching strings against null/missing keys
+    if (query) {
+      const currentAgentKey = (r.agentKey || '').toLowerCase();
+      const currentFullKey = (r.fullKey || '').toLowerCase();
+      const matchQuery = query.toLowerCase();
+      if (!currentAgentKey.includes(matchQuery) && !currentFullKey.includes(matchQuery)) return false;
+    }
     return true;
   });
 
-  const blockedCount = rows.filter((r) => r.verdict === 'ATTACK_SHIELDED').length;
-  const safeCount = rows.length - blockedCount;
+  const blockedCount = safeRows.filter((r) => r?.verdict === 'ATTACK_SHIELDED').length;
+  const safeCount = Math.max(0, safeRows.length - blockedCount);
+  const blockRate = safeRows.length > 0 ? Math.round((blockedCount / safeRows.length) * 100) : 0;
 
   return (
     <div className="space-y-5">
-      {/* Revenue ticker banner */}
       <Panel className="relative overflow-hidden">
         <div className="pointer-events-none absolute inset-0 opacity-30">
           <div className="absolute inset-x-0 top-0 h-px animate-scanline bg-gradient-to-r from-transparent via-emerald/40 to-transparent" />
@@ -66,7 +50,7 @@ export function LiveThreatStream() {
               <Eyebrow>Total Automated Micro-Revenue Settled</Eyebrow>
             </div>
             <div className="mt-1 font-mono text-3xl font-bold tracking-tight text-emerald-glow" style={{ textShadow: '0 0 18px rgba(0,255,163,0.35)' }}>
-              <AnimatedNumber value={revenue} format={(n) => `$${n.toFixed(5)} USDC`} />
+              <AnimatedNumber value={revenue} format={(n) => `$${(n || 0).toFixed(5)} USDC`} />
             </div>
             <div className="mt-1 flex items-center gap-1 text-[11px] text-emerald/70">
               <ArrowUpRight className="h-3 w-3" />
@@ -94,15 +78,13 @@ export function LiveThreatStream() {
             icon={Activity}
             label="Shielded Attacks (window)"
             value={blockedCount.toString()}
-            sub={`${safeCount} safe · ${Math.round((blockedCount / rows.length) * 100)}% block rate`}
+            sub={`${safeCount} safe · ${blockRate}% block rate`}
             accent="ruby"
           />
         </div>
       </Panel>
 
-      {/* Table panel */}
       <Panel className="overflow-hidden">
-        {/* Toolbar */}
         <div className="flex flex-wrap items-center gap-3 border-b border-white/5 px-4 py-3">
           <div className="flex items-center gap-2">
             <span className="h-2 w-2 rounded-full bg-emerald animate-pulseEmerald" />
@@ -121,7 +103,7 @@ export function LiveThreatStream() {
               />
             </div>
             <div className="flex items-center gap-0.5 rounded-lg border border-white/8 bg-ink-850 p-0.5">
-              {(['all', 'safe', 'attack'] as const).map((f) => (
+              {((['all', 'safe', 'attack'] as const)).map((f) => (
                 <button
                   key={f}
                   onClick={() => setFilter(f)}
@@ -146,7 +128,6 @@ export function LiveThreatStream() {
           </div>
         </div>
 
-        {/* Column headers */}
         <div className="grid grid-cols-12 gap-2 border-b border-white/5 px-4 py-2 text-[10px] uppercase tracking-wider text-ink-400">
           <div className="col-span-2">Timestamp</div>
           <div className="col-span-2">Client Agent Key</div>
@@ -155,38 +136,47 @@ export function LiveThreatStream() {
           <div className="col-span-2 text-right">Verdict</div>
         </div>
 
-        {/* Rows */}
-        <div ref={tableRef} className="max-h-[560px] overflow-y-auto">
-          {filtered.map((r) => (
-            <button
-              key={r.id}
-              onClick={() => setSelected(r)}
-              className={`grid w-full grid-cols-12 items-center gap-2 border-b border-white/4 px-4 py-2.5 text-left transition hover:bg-ink-800/60 ${
-                r.verdict === 'ATTACK_SHIELDED' ? 'animate-rowEnterRuby' : 'animate-rowEnter'
-              }`}
-            >
-              <div className="col-span-2 flex flex-col">
-                <span className="font-mono text-[11px] text-ink-100">{new Date(r.epoch).toLocaleTimeString('en-US', { hour12: false })}</span>
-                <span className="text-[9px] text-ink-500">{timeAgo(r.epoch)}</span>
-              </div>
-              <div className="col-span-2 flex items-center gap-2">
-                <span className="grid h-6 w-6 place-items-center rounded-md bg-ink-850 font-mono text-[9px] text-ink-300">
-                  {r.agentKey.slice(2, 4)}
-                </span>
-                <span className="font-mono text-[11px] text-ink-200">{r.agentKey}</span>
-              </div>
-              <div className="col-span-4 hidden md:block">
-                <FlowBadge state={r.flow} />
-              </div>
-              <div className="col-span-2 hidden sm:block">
-                <span className="font-mono text-[11px] text-emerald">+{formatUsd(r.fee, 6).replace('$', '$')}</span>
-                <span className="ml-1 text-[9px] text-ink-500">USDC</span>
-              </div>
-              <div className="col-span-2 flex justify-end">
-                <VerdictBadge verdict={r.verdict} />
-              </div>
-            </button>
-          ))}
+        <div className="max-h-[560px] overflow-y-auto">
+          {!configured && <div className="px-4 py-10 text-center text-xs text-ink-400">Connect Supabase to display live security events.</div>}
+          {configured && loading && <div className="px-4 py-10 text-center text-xs text-ink-400">Loading verified security events…</div>}
+          {configured && error && <div className="px-4 py-10 text-center text-xs text-ruby-glow">Event stream unavailable: {error}</div>}
+          {configured && !loading && !error && filtered.length === 0 && <div className="px-4 py-10 text-center text-xs text-ink-400">No security events match this view.</div>}
+          
+          {configured && !loading && !error && filtered.map((r) => {
+            const dateObj = new Date(r.epoch || 0);
+            const formattedTime = isNaN(dateObj.getTime()) ? '--:--:--' : dateObj.toLocaleTimeString('en-US', { hour12: false });
+            
+            return (
+              <button
+                key={r.id}
+                onClick={() => setSelected(r)}
+                className={`grid w-full grid-cols-12 items-center gap-2 border-b border-white/4 px-4 py-2.5 text-left transition hover:bg-ink-800/60 ${
+                  r.verdict === 'ATTACK_SHIELDED' ? 'animate-rowEnterRuby' : 'animate-rowEnter'
+                }`}
+              >
+                <div className="col-span-2 flex flex-col">
+                  <span className="font-mono text-[11px] text-ink-100">{formattedTime}</span>
+                  <span className="text-[9px] text-ink-500">{timeAgo(r.epoch || 0)}</span>
+                </div>
+                <div className="col-span-2 flex items-center gap-2">
+                  <span className="grid h-6 w-6 place-items-center rounded-md bg-ink-850 font-mono text-[9px] text-ink-300">
+                    {((r.agentKey || '')).slice(2, 4) || '??'}
+                  </span>
+                  <span className="font-mono text-[11px] text-ink-200">{r.agentKey || 'unknown'}</span>
+                </div>
+                <div className="col-span-4 hidden md:block">
+                  <FlowBadge state={r.flow} />
+                </div>
+                <div className="col-span-2 hidden sm:block">
+                  <span className="font-mono text-[11px] text-emerald">+{formatUsd(r.fee || 0, 6)}</span>
+                  <span className="ml-1 text-[9px] text-ink-500">USDC</span>
+                </div>
+                <div className="col-span-2 flex justify-end">
+                  <VerdictBadge verdict={r.verdict} />
+                </div>
+              </button>
+            );
+          })}
         </div>
       </Panel>
 
@@ -233,7 +223,7 @@ function MetricCard({
         <Eyebrow>{label}</Eyebrow>
         {animated && animatedValue !== undefined ? (
           <span className={`font-mono text-xl font-bold ${colorMap[accent]}`}>
-            <AnimatedNumber value={animatedValue} format={(n) => Math.floor(n).toLocaleString()} />
+            <AnimatedNumber value={animatedValue} format={(n) => Math.floor(n || 0).toLocaleString()} />
           </span>
         ) : (
           <span className={`font-mono text-xl font-bold ${colorMap[accent]}`}>{value}</span>

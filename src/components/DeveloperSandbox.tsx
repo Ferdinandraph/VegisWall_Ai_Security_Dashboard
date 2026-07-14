@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Play, RotateCcw, Terminal, ShieldCheck, ShieldAlert, CheckCircle2, Loader, Zap, Wallet, FileSignature, Receipt, ScanSearch, Gavel } from 'lucide-react';
-import { SANDBOX_PRESETS, SANDBOX_STEPS } from '../data/mock';
+import { SANDBOX_PRESETS } from '../data/sandbox';
+import { supabase } from '../lib/supabase';
 import { Panel, Eyebrow, VerdictBadge } from './ui';
 import { VectorBar } from './Charts';
 
@@ -8,6 +9,13 @@ type Phase = 'idle' | 'running' | 'done';
 type StepStatus = 'pending' | 'active' | 'done';
 
 const STEP_ICONS = [Zap, Wallet, FileSignature, ScanSearch, Gavel];
+const SANDBOX_STEPS = [
+  { label: 'Submitting request to guardrail API', detail: 'The server authenticates and validates the request.' },
+  { label: 'Verifying payment requirements', detail: 'The server verifies the x402 payment proof when enabled.' },
+  { label: 'Running policy evaluation', detail: 'The configured guardrail service evaluates the prompt.' },
+  { label: 'Recording security event', detail: 'The server writes an audit event to the protected event store.' },
+  { label: 'Returning signed verdict', detail: 'The dashboard displays the server response.' },
+];
 
 export function DeveloperSandbox() {
   const [text, setText] = useState(SANDBOX_PRESETS[0].text);
@@ -16,24 +24,48 @@ export function DeveloperSandbox() {
   const [steps, setSteps] = useState<StepStatus[]>(SANDBOX_STEPS.map(() => 'pending'));
   const [verdict, setVerdict] = useState<'SAFE' | 'ATTACK_SHIELDED' | null>(null);
 
-  const isAttack = /ignore|disregard|override|bypass|dump|exfiltrat|system prompt|jailbreak|unrestricted|base64|SWdub3Jl/i.test(text);
+  const [result, setResult] = useState<{ verdict: 'SAFE' | 'ATTACK_SHIELDED'; vectors: typeof attackVectors; receipt?: string } | null>(null);
+  const guardrailUrl = import.meta.env.VITE_GUARDRAIL_API_URL;
+  const attackVectors = { systemOverride: 0, dataLeakage: 0, promptInjection: 0, jailbreakAttempt: 0, toolAbuse: 0, credentialExfil: 0 };
 
   const execute = async () => {
     if (phase === 'running') return;
     setPhase('running');
-    setVerdict(null);
+    setVerdict(null); setResult(null);
     setSteps(SANDBOX_STEPS.map(() => 'pending'));
     setStepIdx(0);
 
-    for (let i = 0; i < SANDBOX_STEPS.length; i++) {
+    for (let i = 0; i < 3; i++) {
       setStepIdx(i);
       setSteps((prev) => prev.map((s, idx) => (idx === i ? 'active' : s)));
-      await new Promise((res) => setTimeout(res, 620 + Math.random() * 280));
+      await new Promise((res) => setTimeout(res, 250));
       setSteps((prev) => prev.map((s, idx) => (idx === i ? 'done' : s)));
     }
-    setStepIdx(-1);
-    setVerdict(isAttack ? 'ATTACK_SHIELDED' : 'SAFE');
-    setPhase('done');
+    try {
+      if (!guardrailUrl) throw new Error('VITE_GUARDRAIL_API_URL is not configured.');
+      // Prefer an authenticated user's access token when available, fall back to the configured anon key.
+      // Update this block in DeveloperSandbox.tsx
+      const sessionResp = supabase ? await supabase.auth.getSession() : null;
+      // Access the token correctly: session?.access_token
+      const accessToken = sessionResp?.data?.session?.access_token ?? import.meta.env.VITE_SUPABASE_ANON_KEY;
+      if (!accessToken) throw new Error('No authorization token available: set VITE_SUPABASE_ANON_KEY or sign in.');
+      // Log token source and masked token to help debug 401s (masked in console)
+      const tokenSource = sessionResp?.data?.session ? 'user' : 'anon';
+      const masked = accessToken.length > 10 ? `${accessToken.slice(0,6)}...${accessToken.slice(-4)}` : '*****';
+      // eslint-disable-next-line no-console
+      const response = await fetch(guardrailUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` }, body: JSON.stringify({ prompt: text }) });
+      if (!response.ok) throw new Error(`Guardrail API returned ${response.status}.`);
+      const payload = await response.json() as { verdict: 'SAFE' | 'ATTACK_SHIELDED'; vectors?: typeof attackVectors; receipt?: string };
+      if (payload.verdict !== 'SAFE' && payload.verdict !== 'ATTACK_SHIELDED') throw new Error('Guardrail API returned an invalid verdict.');
+      setResult({ verdict: payload.verdict, vectors: payload.vectors ?? attackVectors, receipt: payload.receipt });
+      setVerdict(payload.verdict);
+      setSteps(SANDBOX_STEPS.map(() => 'done'));
+    } catch (cause) {
+      setSteps(SANDBOX_STEPS.map(() => 'pending'));
+      setVerdict(null);
+      setResult(null);
+      window.alert(cause instanceof Error ? cause.message : 'Guardrail request failed.');
+    } finally { setStepIdx(-1); setPhase('done'); }
   };
 
   const reset = () => {
@@ -43,14 +75,7 @@ export function DeveloperSandbox() {
     setStepIdx(-1);
   };
 
-  const attackVectors = {
-    systemOverride: isAttack ? 91 : 8,
-    dataLeakage: isAttack ? 86 : 6,
-    promptInjection: isAttack ? 94 : 11,
-    jailbreakAttempt: isAttack ? 73 : 5,
-    toolAbuse: isAttack ? 64 : 9,
-    credentialExfil: isAttack ? 88 : 7,
-  };
+  const riskVectors = result?.vectors ?? attackVectors;
 
   return (
     <div className="space-y-5">
@@ -109,7 +134,7 @@ export function DeveloperSandbox() {
                     reset();
                   }}
                   className={`rounded-lg border px-3 py-1.5 text-[11px] transition ${
-                    p.isAttack
+                    p.name !== 'Safe RAG Query'
                       ? 'border-ruby/30 bg-ruby/5 text-ruby-glow hover:bg-ruby/15'
                       : 'border-emerald/30 bg-emerald/5 text-emerald hover:bg-emerald/15'
                   }`}
@@ -224,25 +249,25 @@ export function DeveloperSandbox() {
                   <div>
                     <Eyebrow className="mb-2">Detected Risk Vectors</Eyebrow>
                     <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                      <VectorBar label="System Override" value={attackVectors.systemOverride} danger />
-                      <VectorBar label="Data Leakage" value={attackVectors.dataLeakage} danger />
-                      <VectorBar label="Prompt Injection" value={attackVectors.promptInjection} danger />
-                      <VectorBar label="Jailbreak" value={attackVectors.jailbreakAttempt} danger />
-                      <VectorBar label="Tool Abuse" value={attackVectors.toolAbuse} danger />
-                      <VectorBar label="Credential Exfil" value={attackVectors.credentialExfil} danger />
+                      <VectorBar label="System Override" value={riskVectors.systemOverride} danger />
+                      <VectorBar label="Data Leakage" value={riskVectors.dataLeakage} danger />
+                      <VectorBar label="Prompt Injection" value={riskVectors.promptInjection} danger />
+                      <VectorBar label="Jailbreak" value={riskVectors.jailbreakAttempt} danger />
+                      <VectorBar label="Tool Abuse" value={riskVectors.toolAbuse} danger />
+                      <VectorBar label="Credential Exfil" value={riskVectors.credentialExfil} danger />
                     </div>
                   </div>
 
                   <div className="code-window px-4 py-3">
                     <div className="mb-1 text-[10px] text-ink-500">// vegiswall.response</div>
                     <pre className="text-[11.5px] text-ruby-glow">{`{
-  "status": 403,
-  "verdict": "ATTACK_SHIELDED",
-  "reason": "prompt_injection_detected",
-  "tool_calls_blocked": 0,
-  "receipt_settled": true,
-  "fee": "0.005 USDC"
-}`}</pre>
+                      "status": 403,
+                      "verdict": "ATTACK_SHIELDED",
+                      "reason": "prompt_injection_detected",
+                      "tool_calls_blocked": 0,
+                      "receipt_settled": true,
+                      "fee": "0.005 USDC"
+                    }`}</pre>
                   </div>
                 </div>
               )}
@@ -263,10 +288,10 @@ export function DeveloperSandbox() {
                   <div>
                     <Eyebrow className="mb-2">Risk Profile (nominal)</Eyebrow>
                     <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                      <VectorBar label="System Override" value={attackVectors.systemOverride} />
-                      <VectorBar label="Data Leakage" value={attackVectors.dataLeakage} />
-                      <VectorBar label="Prompt Injection" value={attackVectors.promptInjection} />
-                      <VectorBar label="Jailbreak" value={attackVectors.jailbreakAttempt} />
+                      <VectorBar label="System Override" value={riskVectors.systemOverride} />
+                      <VectorBar label="Data Leakage" value={riskVectors.dataLeakage} />
+                      <VectorBar label="Prompt Injection" value={riskVectors.promptInjection} />
+                      <VectorBar label="Jailbreak" value={riskVectors.jailbreakAttempt} />
                     </div>
                   </div>
 

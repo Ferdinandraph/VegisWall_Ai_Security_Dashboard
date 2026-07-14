@@ -1,13 +1,17 @@
 import { TrendingUp, Clock, Target, Users, Activity, Zap, ShieldOff, Gauge } from 'lucide-react';
-import { LATENCY_SERIES, ATTACK_VECTOR_PROFILE, AGENT_VOLUME } from '../data/mock';
+import type { DashboardMetrics, ThreatRow } from '../types/security';
 import { LineChart, DoughnutChart, BarChart } from './Charts';
 import { Panel, Eyebrow } from './ui';
 
-export function ThreatTelemetry() {
-  const totalEvents = AGENT_VOLUME.reduce((s, a) => s + a.safe + a.blocked, 0);
-  const totalBlocked = AGENT_VOLUME.reduce((s, a) => s + a.blocked, 0);
-  const avgLatency = (LATENCY_SERIES.reduce((s, d) => s + d.latency, 0) / LATENCY_SERIES.length).toFixed(1);
-  const peakLatency = Math.max(...LATENCY_SERIES.map((d) => d.p99));
+export function ThreatTelemetry({ events, metrics, configured, loading, error }: { events: ThreatRow[]; metrics: DashboardMetrics; configured: boolean; loading: boolean; error: string | null }) {
+  const totalEvents = metrics.totalScans;
+  const totalBlocked = metrics.blockedAttacks;
+  const latencies = events.map((event) => event.latencyMs).filter((value): value is number => value !== null);
+  const avgLatency = metrics.averageLatencyMs?.toFixed(1) ?? '—';
+  const peakLatency = latencies.length ? Math.max(...latencies) : null;
+  const latencySeries = latencies.length ? latencies.map((latency, index) => ({ latency, p99: latency, label: events[index].timestamp.slice(11, 16) })) : [{ latency: 0, p99: 0, label: 'No data' }];
+  const attackVectorProfile = buildAttackVectorProfile(events);
+  const agentVolume = buildAgentVolume(events);
 
   return (
     <div className="space-y-5">
@@ -23,12 +27,27 @@ export function ThreatTelemetry() {
         </div>
       </div>
 
+      {/* Connection status banner */}
+      <div className={`rounded-xl border px-4 py-3 text-sm ${error ? 'border-ruby/30 bg-ruby/10 text-ruby-glow' : !configured ? 'border-ruby/30 bg-ruby/10 text-ruby-glow' : loading ? 'border-amber/30 bg-amber/10 text-amber-glow' : events.length === 0 && metrics.totalScans === 0 ? 'border-amber/30 bg-amber/10 text-amber-glow' : 'border-emerald/30 bg-emerald/10 text-emerald'}`}>
+        {error ? (
+          <span>Failed to load threat telemetry: {error}</span>
+        ) : !configured ? (
+          <span>Supabase not connected. Configure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your .env to load live metrics.</span>
+        ) : loading ? (
+          <span>Connected to Supabase — fetching live telemetry...</span>
+        ) : events.length === 0 && metrics.totalScans === 0 ? (
+          <span>Connected to Supabase, but no event data was returned. Confirm the `security_events` table contains rows and the Supabase schema is deployed.</span>
+        ) : (
+          <span>Connected to Supabase — live threat telemetry is enabled.</span>
+        )}
+      </div>
+
       {/* KPI row */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <KpiCard icon={Zap} label="Total Events (48h)" value={totalEvents.toLocaleString()} sub="all registered agents" accent="azure" />
-        <KpiCard icon={ShieldOff} label="Attacks Shielded" value={totalBlocked.toLocaleString()} sub={`${((totalBlocked / totalEvents) * 100).toFixed(1)}% block rate`} accent="ruby" />
+        <KpiCard icon={ShieldOff} label="Attacks Shielded" value={totalBlocked.toLocaleString()} sub={totalEvents ? `${((totalBlocked / totalEvents) * 100).toFixed(1)}% block rate` : 'no recorded events'} accent="ruby" />
         <KpiCard icon={Gauge} label="Avg Mitigation Latency" value={`${avgLatency}ms`} sub="median across nodes" accent="emerald" />
-        <KpiCard icon={Clock} label="Peak p99 Latency" value={`${peakLatency}ms`} sub="worst-case window" accent="amber" />
+        <KpiCard icon={Clock} label="Peak Latency" value={peakLatency === null ? '—' : `${peakLatency}ms`} sub="recorded event window" accent="amber" />
       </div>
 
       {/* Charts grid */}
@@ -46,7 +65,7 @@ export function ThreatTelemetry() {
             </div>
           </div>
           <div className="p-4">
-            <LineChart data={LATENCY_SERIES} />
+            <LineChart data={latencySeries} />
           </div>
         </Panel>
 
@@ -57,7 +76,7 @@ export function ThreatTelemetry() {
             <span className="text-[13px] font-semibold text-white">Attack Vector Profile</span>
           </div>
           <div className="flex items-center justify-center p-5">
-            <DoughnutChart data={ATTACK_VECTOR_PROFILE} />
+            <DoughnutChart data={attackVectorProfile} />
           </div>
         </Panel>
       </div>
@@ -75,19 +94,47 @@ export function ThreatTelemetry() {
           </div>
         </div>
         <div className="p-5">
-          <BarChart data={AGENT_VOLUME} />
+          <BarChart data={agentVolume} />
         </div>
       </Panel>
 
       {/* Footer stat strip */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <MiniStat label="Uptime (30d)" value="99.998%" accent="emerald" />
-        <MiniStat label="False Positive Rate" value="0.31%" accent="azure" />
-        <MiniStat label="Avg Fee / Scan" value="$0.0056" accent="amber" />
-        <MiniStat label="Revenue (24h)" value="$2,841.12" accent="emerald" />
+        <MiniStat label="Data Source" value={configured ? 'Supabase' : 'Not connected'} accent="azure" />
+        <MiniStat label="Event Window" value={`${events.length} events`} accent="emerald" />
+        <MiniStat label="Avg Fee / Scan" value={totalEvents ? `$${(metrics.totalRevenue / totalEvents).toFixed(6)}` : '—'} accent="amber" />
+        <MiniStat label="Revenue Recorded" value={`$${metrics.totalRevenue.toFixed(2)}`} accent="emerald" />
       </div>
     </div>
   );
+}
+
+// Revert back to using your camelCase types inside the component helpers:
+function buildAttackVectorProfile(events: ThreatRow[]) {
+  const attacks = events.filter((event) => event.verdict === 'ATTACK_SHIELDED');
+  const definitions = [ 
+    ['System Prompt Override', 'systemOverride', '#ef2b48'], 
+    ['API / Data Exfiltration', 'dataLeakage', '#f59e0b'], 
+    ['Jailbreak', 'jailbreakAttempt', '#ff3b5c'], 
+    ['Tool Abuse', 'toolAbuse', '#1ea8e8'], 
+    ['Credential Exfiltration', 'credentialExfil', '#a8b1c2'] 
+  ] as const;
+
+  return definitions.map(([label, field, color]) => ({ 
+    label, 
+    color, 
+    value: attacks.reduce((sum, event) => sum + (event.vectors?.[field] ?? 0), 0) 
+  }));
+}
+
+function buildAgentVolume(events: ThreatRow[]) {
+  const grouped = new Map<string, { key: string; full: string; safe: number; blocked: number }>();
+  for (const event of events) { 
+    const item = grouped.get(event.fullKey) ?? { key: event.agentKey, full: event.fullKey, safe: 0, blocked: 0 }; 
+    item[event.verdict === 'SAFE' ? 'safe' : 'blocked'] += 1; 
+    grouped.set(event.fullKey, item); 
+  }
+  return [...grouped.values()].length ? [...grouped.values()] : [{ key: 'No data', full: 'No data', safe: 0, blocked: 0 }];
 }
 
 function KpiCard({

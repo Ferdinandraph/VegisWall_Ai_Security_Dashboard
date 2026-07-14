@@ -3,6 +3,7 @@ import { Sidebar, MobileNav, type ViewId } from './components/Sidebar';
 import { LiveThreatStream } from './components/LiveThreatStream';
 import { DeveloperSandbox } from './components/DeveloperSandbox';
 import { ThreatTelemetry } from './components/ThreatTelemetry';
+import { useSecurityEvents } from './hooks/useSecurityEvents';
 import { Shield, Activity, FlaskConical, BarChart3 } from 'lucide-react';
 
 const VIEW_META: Record<ViewId, { title: string; sub: string; icon: typeof Shield }> = {
@@ -13,6 +14,7 @@ const VIEW_META: Record<ViewId, { title: string; sub: string; icon: typeof Shiel
 
 function App() {
   const [view, setView] = useState<ViewId>('stream');
+  const security = useSecurityEvents();
   const meta = VIEW_META[view];
   const Icon = meta.icon;
 
@@ -54,9 +56,9 @@ function App() {
         {/* Main content */}
         <main className="flex-1 px-4 py-5 md:px-6 md:py-6">
           <div key={view} className="animate-[fadeIn_0.3s_ease-out]">
-            {view === 'stream' && <LiveThreatStream />}
+            {view === 'stream' && <LiveThreatStream rows={security.events} metrics={security.metrics} loading={security.loading} configured={security.configured} error={security.error} />}
             {view === 'sandbox' && <DeveloperSandbox />}
-            {view === 'telemetry' && <ThreatTelemetry />}
+            {view === 'telemetry' && <ThreatTelemetry events={security.events} metrics={security.metrics} configured={security.configured} loading={security.loading} error={security.error} />}
           </div>
         </main>
 
