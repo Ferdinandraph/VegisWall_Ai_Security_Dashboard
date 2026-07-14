@@ -27,20 +27,6 @@ export function ThreatTelemetry({ events, metrics, configured, loading, error }:
         </div>
       </div>
 
-      {/* Connection status banner */}
-      <div className={`rounded-xl border px-4 py-3 text-sm ${error ? 'border-ruby/30 bg-ruby/10 text-ruby-glow' : !configured ? 'border-ruby/30 bg-ruby/10 text-ruby-glow' : loading ? 'border-amber/30 bg-amber/10 text-amber-glow' : events.length === 0 && metrics.totalScans === 0 ? 'border-amber/30 bg-amber/10 text-amber-glow' : 'border-emerald/30 bg-emerald/10 text-emerald'}`}>
-        {error ? (
-          <span>Failed to load threat telemetry: {error}</span>
-        ) : !configured ? (
-          <span>Supabase not connected. Configure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your .env to load live metrics.</span>
-        ) : loading ? (
-          <span>Connected to Supabase — fetching live telemetry...</span>
-        ) : events.length === 0 && metrics.totalScans === 0 ? (
-          <span>Connected to Supabase, but no event data was returned. Confirm the `security_events` table contains rows and the Supabase schema is deployed.</span>
-        ) : (
-          <span>Connected to Supabase — live threat telemetry is enabled.</span>
-        )}
-      </div>
 
       {/* KPI row */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
