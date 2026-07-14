@@ -21,4 +21,4 @@ dist-ssr
 *.sln
 *.sw?
 .env
-server/.env
+server/server.env
