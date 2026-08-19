@@ -1,11 +1,14 @@
+// components/Sidebar.tsx
 import { useState } from 'react';
-import { Shield, Activity, FlaskConical, BarChart3, Radio, Lock, ChevronRight, Zap } from 'lucide-react';
+import { Shield, Activity, FlaskConical, BarChart3, Radio, Lock, ChevronRight, Zap, Key } from 'lucide-react';
+import { DEFAULT_SANDBOX_KEY } from '../config/keys';
 
-export type ViewId = 'stream' | 'sandbox' | 'telemetry';
+export type ViewId = 'stream' | 'sandbox' | 'telemetry' | 'keys';
 
 const NAV: { id: ViewId; label: string; sub: string; icon: typeof Shield }[] = [
   { id: 'stream', label: 'Live Threat Stream', sub: 'Real-time M2M traffic', icon: Activity },
   { id: 'sandbox', label: 'Developer Sandbox', sub: 'Test & simulate', icon: FlaskConical },
+  { id: 'keys', label: 'API Keys', sub: 'Generate & manage', icon: Key },
   { id: 'telemetry', label: 'Threat Telemetry', sub: 'Network analytics', icon: BarChart3 },
 ];
 
@@ -45,6 +48,12 @@ export function Sidebar({
           <span>Base mainnet</span>
           <span className="font-mono text-azure-glow">8453</span>
         </div>
+        
+        {/* Active API Key Indicator */}
+        <div className="mt-2.5 pt-2 border-t border-white/5 flex items-center gap-1.5 text-[10px] text-ink-300">
+          <Key className="h-3 w-3 text-emerald" />
+          <span className="truncate font-mono">{DEFAULT_SANDBOX_KEY.key.substring(0, 14)}...</span>
+        </div>
       </div>
 
       {/* Nav */}
@@ -81,7 +90,7 @@ export function Sidebar({
       <div className="border-t border-white/5 px-4 py-4">
         <div className="flex items-center gap-2 text-[10px] text-ink-400">
           <Lock className="h-3 w-3" />
-          <span>E2E encrypted · EIP-4361</span>
+          <span>E2E encrypted · EIP-712</span>
         </div>
         <div className="mt-2 flex items-center gap-2 text-[10px] text-ink-400">
           <Zap className="h-3 w-3 text-amber-glow" />

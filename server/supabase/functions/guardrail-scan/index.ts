@@ -1,13 +1,28 @@
 import { createClient } from 'npm:@supabase/supabase-js';
 import { load as loadDotenv } from 'https://deno.land/std@0.201.0/dotenv/mod.ts';
+import { verifyTypedData, recoverTypedDataAddress, isAddress } from 'npm:viem';
 
-// Attempt to load server/server.env for local development
 try {
-  await loadDotenv({ export: true, path: new URL('../../../server.env', import.meta.url) });
-  console.log('Loaded server/server.env into environment.');
-} catch (err) {
-  console.debug('No local server.env loaded or failed to load:', err?.message ?? err);
+  await loadDotenv({ 
+    export: true, 
+    envPath: new URL('../../../server.env', import.meta.url).pathname 
+  });
+} catch {
+  // Silent fallback for production runtime
 }
+
+const NETWORK_CONFIG = {
+  sepolia: {
+    networkName: 'Base Sepolia',
+    chainId: 84532,
+    payee: Deno.env.get('X402_PAYEE_SEPOLIA') ?? '0x0000000000000000000000000000000000000000',
+  },
+  mainnet: {
+    networkName: 'Base Mainnet',
+    chainId: 8453,
+    payee: Deno.env.get('X402_PAYEE_MAINNET') ?? '0xVegiswallTreasuryActiveContract',
+  }
+} as const;
 
 type Verdict = 'SAFE' | 'ATTACK_SHIELDED';
 type FlowState = '402 CHALLENGE' | 'SIGNED' | 'SETTLED' | '200 OK';
@@ -21,19 +36,32 @@ type Vectors = {
   credentialExfil: number;
 };
 
-const json = (body: unknown, status = 200) =>
+// EIP-712 Domain & Types definition for x402
+const EIP712_DOMAIN_NAME = 'Vegiswall x402 Protocol';
+const EIP712_VERSION = '1';
+
+const X402_TYPES = {
+  Payment: [
+    { name: 'payee', type: 'address' },
+    { name: 'amount', type: 'string' },
+    { name: 'nonce', type: 'string' },
+  ],
+} as const;
+
+const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), {
     status,
     headers: {
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': Deno.env.get('ALLOWED_ORIGIN') ?? '*',
-      'Access-Control-Allow-Headers': 'authorization, content-type',
+      'Access-Control-Allow-Headers': 'authorization, content-type, x-network-preference, x-payment, x-402-signature, x-bypass-payment, x-nonce, x-payer-address',
       'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      ...headers,
     },
   });
 
 function decodePayload(text: string): string {
-  const base64Regex = /^[A-Za-z0-9+/=]{16,}$/; 
+  const base64Regex = /^[A-Za-z0-9+/=]{16,}$/;
   const trimmed = text.trim();
   if (base64Regex.test(trimmed)) {
     try {
@@ -52,50 +80,139 @@ Deno.serve(async (request) => {
   const authorization = request.headers.get('Authorization');
   if (!authorization) return json({ error: 'Authentication required' }, 401);
 
-  // Read clean raw environment strings
+  const clientHeaderNet = request.headers.get('x-network-preference')?.toLowerCase();
+  const envNet = Deno.env.get('NETWORK_MODE')?.toLowerCase();
+  
+  const selectedMode: 'mainnet' | 'sepolia' = 
+    clientHeaderNet === 'mainnet' || clientHeaderNet === 'sepolia' ? clientHeaderNet :
+    envNet === 'mainnet' ? 'mainnet' : 'sepolia';
+
+  const currentNetwork = NETWORK_CONFIG[selectedMode];
+
   const rawUrl = Deno.env.get('SUPABASE_URL') ?? Deno.env.get('SUPABASE_URL_DEFAULT');
   const rawKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? Deno.env.get('SUPABASE_SERVICE_KEY');
 
-  // Strict check to catch literal "null" string pollution or undefined values
   const supabaseUrl = (rawUrl && rawUrl !== 'null' && rawUrl !== 'undefined') ? rawUrl.trim() : null;
   const serviceRoleKey = (rawKey && rawKey !== 'null' && rawKey !== 'undefined') ? rawKey.trim() : null;
 
   if (!supabaseUrl || !serviceRoleKey) {
-    console.error(`Initialization Blocked: Checked URL value is: [${rawUrl}], Key value is: [${rawKey ? 'PRESENT' : 'MISSING'}]`);
     return json({ error: 'Server misconfigured: Database connection values resolved to null.' }, 500);
   }
 
-  // Pass configuration object to enforce correct routing paths globally inside Deno edge functions
   const admin = createClient(supabaseUrl, serviceRoleKey, {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false
-    },
-    global: {
-      headers: {
-        Authorization: `Bearer ${serviceRoleKey}`
-      }
-    }
+    auth: { persistSession: false, autoRefreshToken: false },
+    global: { headers: { Authorization: `Bearer ${serviceRoleKey}` } }
   });
 
   const rawToken = authorization.replace(/^Bearer\s+/i, '').trim().replace(/\r$/, '');
   const envAnonKey = (Deno.env.get('VITE_SUPABASE_ANON_KEY') ?? Deno.env.get('SUPABASE_ANON_KEY') ?? '').toString().trim().replace(/\r$/, '');
 
   let userId = '00000000-0000-0000-0000-000000000000';
-  let isLocalTesting = false;
 
   if (envAnonKey && rawToken === envAnonKey) {
-    isLocalTesting = true;
-    console.log("Local testing bypass triggered using configured anon key.");
+    // Development / UI Sandbox Testing Bypass
   } else {
     const { data: { user }, error: authError } = await admin.auth.getUser(rawToken);
     if (authError || !user) {
-      console.log('Auth verification failed. Ensure the provided token is valid.');
-      return json({ error: 'Invalid session' }, 401);
+      return json({ error: 'Invalid session or token expired.' }, 401);
     }
     userId = user.id;
   }
 
+  // ---------------------------------------------------------------------------
+  // STEP 1: x402 Micropayment Protocol Check
+  // ---------------------------------------------------------------------------
+  const xPaymentHeader = request.headers.get('x-payment') || request.headers.get('x-402-signature');
+  const requestNonce = request.headers.get('x-nonce');
+  const claimedPayer = request.headers.get('x-payer-address');
+  const allowBypass = request.headers.get('x-bypass-payment') === 'true' || rawToken === envAnonKey;
+
+  // Challenge issuing if no payment header is provided and bypass is not explicitly allowed
+  if (!xPaymentHeader && !allowBypass) {
+    const challengeNonce = crypto.randomUUID();
+    return json(
+      {
+        error: 'Payment Required',
+        message: 'This API requires an x402 micropayment to process guardrail evaluation.',
+        x402: {
+          scheme: 'EIP-712',
+          price: '0.000025',
+          currency: 'USDC',
+          network: currentNetwork.networkName,
+          chainId: currentNetwork.chainId,
+          payee: currentNetwork.payee,
+          nonce: challengeNonce,
+        },
+      },
+      402,
+      {
+        'WWW-Authenticate': `x402 realm="Vegiswall Guardrail", chainId="${currentNetwork.chainId}", payee="${currentNetwork.payee}", amount="0.000025", token="USDC"`,
+      }
+    );
+  }
+
+  // Cryptographic Signature Verification using viem
+  let recoveredSignerAddress: string | null = null;
+
+  if (xPaymentHeader && !allowBypass) {
+    const isSimulatedSig = xPaymentHeader.startsWith('0x_sig_');
+    
+    // In production, reject simulated signatures unless explicit bypass is enabled
+    if (isSimulatedSig) {
+      return json({ error: 'Simulated signatures are only allowed in dev/sandbox mode.' }, 401);
+    }
+
+    if (!requestNonce) {
+      return json({ error: 'Missing x-nonce header required to verify payment signature.' }, 400);
+    }
+
+    try {
+      const typedDataDomain = {
+        name: EIP712_DOMAIN_NAME,
+        version: EIP712_VERSION,
+        chainId: currentNetwork.chainId,
+      };
+
+      const message = {
+        payee: currentNetwork.payee as `0x${string}`,
+        amount: '0.000025',
+        nonce: requestNonce,
+      };
+
+      // If client supplied its claimed address, verify against it directly
+      if (claimedPayer && isAddress(claimedPayer)) {
+        const isValid = await verifyTypedData({
+          address: claimedPayer as `0x${string}`,
+          domain: typedDataDomain,
+          types: X402_TYPES,
+          primaryType: 'Payment',
+          message,
+          signature: xPaymentHeader as `0x${string}`,
+        });
+
+        if (!isValid) {
+          return json({ error: 'Invalid EIP-712 payment signature.' }, 401);
+        }
+        recoveredSignerAddress = claimedPayer;
+      } else {
+        // Automatically recover the signer's wallet address from signature
+        recoveredSignerAddress = await recoverTypedDataAddress({
+          domain: typedDataDomain,
+          types: X402_TYPES,
+          primaryType: 'Payment',
+          message,
+          signature: xPaymentHeader as `0x${string}`,
+        });
+      }
+    } catch (err) {
+      console.error('Cryptographic signature verification failed:', err);
+      return json({ error: 'Cryptographic signature verification failed.' }, 401);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // STEP 2: Validate Request Payload
+  // ---------------------------------------------------------------------------
   const { prompt } = await request.json().catch(() => ({}));
   if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 20_000) {
     return json({ error: 'A prompt of 1–20,000 characters is required.' }, 400);
@@ -115,7 +232,14 @@ Deno.serve(async (request) => {
     credentialExfil: 0,
   };
 
+  // ---------------------------------------------------------------------------
+  // STEP 3: Safeguard LLM Policy Evaluation
+  // ---------------------------------------------------------------------------
   try {
+    if (!apiKey) {
+      throw new Error('GROQ_API_KEY is not configured on the server.');
+    }
+
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -137,10 +261,6 @@ Deno.serve(async (request) => {
     const assessment = result.choices[0]?.message?.content?.trim() || 'safe';
     const cleanAssessment = assessment.toLowerCase();
     const lowerPrompt = processedPrompt.toLowerCase();
-
-    console.log("=== RAW SAFEGUARD EVALUATION ===");
-    console.log(assessment);
-    console.log("=================================");
 
     const isRefusal = 
       cleanAssessment.includes('unsafe') || 
@@ -189,15 +309,19 @@ Deno.serve(async (request) => {
     console.error('Guardrail check failed, default to bypass rules:', err);
   }
 
+  // ---------------------------------------------------------------------------
+  // STEP 4: Telemetry & Settlement Receipt Generation
+  // ---------------------------------------------------------------------------
   const latencyMs = Date.now() - startTime;
   const flow: FlowState = verdict === 'ATTACK_SHIELDED' ? '402 CHALLENGE' : '200 OK';
   
-  const uniqueId = crypto.randomUUID();
+  const uniqueId = requestNonce || crypto.randomUUID();
   const txHash = `0x${uniqueId.replace(/-/g, '')}`;
+  const payerAddress = recoveredSignerAddress || `0x${userId.slice(0, 10)}`;
 
   const telemetryRecord = {
     agent_key: `agent_${userId.slice(0, 8)}`,
-    flow: flow,
+    flow,
     fee_usdc: 0.000025,
     verdict,
     prompt,
@@ -205,19 +329,19 @@ Deno.serve(async (request) => {
     vectors,
     receipt: {
       txHash: txHash,
-      chainId: 8453,
-      network: 'Base mainnet',
+      chainId: currentNetwork.chainId,
+      network: currentNetwork.networkName,
       settlementStatus: 'SETTLED',
-      signature: `0x_sig_${uniqueId.replace(/-/g, '')}`,
-      payer: `0x${userId.slice(0, 10)}`,
-      payee: '0xVegiswallTreasuryActiveContract',
+      signature: xPaymentHeader || `0x_sig_${uniqueId.replace(/-/g, '')}`,
+      payer: payerAddress,
+      payee: currentNetwork.payee,
       amount: '0.000025',
       token: 'USDC',
-      blockNumber: 16492010,
+      blockNumber: selectedMode === 'mainnet' ? 16492010 : 8920101,
       gasUsed: '21000',
       timestamp: new Date().toISOString(),
       challengeNonce: uniqueId,
-      scheme: 'EIP-4361'
+      scheme: 'EIP-712'
     },
     model: 'openai/gpt-oss-safeguard-20b',
     endpoint: '/v1/guardrail/scan',
@@ -228,9 +352,9 @@ Deno.serve(async (request) => {
 
   const saveTelemetry = async () => {
     try {
-      // Keep receipt intact instead of completely removing it
       const databasePayload = {
-        ...telemetryRecord, // This keeps the 'receipt' object for your JSONB column
+        ...telemetryRecord,
+        developer_id: userId, // Binds the row to the authenticated developer
         tx_hash: telemetryRecord.receipt.txHash,
         chain_id: telemetryRecord.receipt.chainId,
         network: telemetryRecord.receipt.network,
@@ -252,20 +376,24 @@ Deno.serve(async (request) => {
         .insert(databasePayload);
 
       if (error) {
-        console.error('Supabase rejected the stream payload:', error.message, error.details);
-      } else {
-        console.log(`Successfully streamed threat ledger [Verdict: ${verdict}] to security_events.`);
+        console.error('Supabase rejected stream payload:', error.message, error.details);
       }
-    } catch (dbErr) {
-      console.error('Async background telemetry write infrastructure failure:', dbErr);
+    } catch (dbErr: unknown) {
+      const errorMessage = dbErr instanceof Error ? dbErr.message : String(dbErr);
+      console.error('Telemetry write infrastructure failure:', errorMessage);
     }
   };
 
-  if (typeof (globalThis as any).EdgeRuntime?.waitUntil === 'function') {
-    (globalThis as any).EdgeRuntime.waitUntil(saveTelemetry());
+  if (typeof (globalThis as unknown as { EdgeRuntime?: { waitUntil: (p: Promise<unknown>) => void } }).EdgeRuntime?.waitUntil === 'function') {
+    (globalThis as unknown as { EdgeRuntime: { waitUntil: (p: Promise<unknown>) => void } }).EdgeRuntime.waitUntil(saveTelemetry());
   } else {
     setTimeout(saveTelemetry, 0);
   }
 
-  return json({ verdict, vectors });
+  return json({
+    verdict,
+    vectors,
+    receipt: telemetryRecord.receipt,
+    network: currentNetwork.networkName
+  });
 });

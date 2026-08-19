@@ -42,3 +42,20 @@ $$;
 
 -- ADJUSTMENT 3: Grant execute permissions to 'anon' as well as 'authenticated'
 grant execute on function public.get_security_dashboard_metrics() to anon, authenticated;
+
+create table if not exists public.developer_accounts (
+  id uuid primary key default gen_random_uuid(),
+  created_at timestamptz not null default now(),
+  name text not null,
+  email text not null unique,
+  password_hash text not null
+);
+
+create index if not exists developer_accounts_email_idx on public.developer_accounts (email);
+alter table public.developer_accounts enable row level security;
+
+create policy "Anyone can create developer accounts"
+  on public.developer_accounts for insert to anon, authenticated with check (true);
+
+create policy "Anyone can read developer accounts"
+  on public.developer_accounts for select to anon, authenticated using (true);
