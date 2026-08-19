@@ -48,14 +48,33 @@ const X402_TYPES = {
   ],
 } as const;
 
-const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
+// Helper function to resolve dynamic CORS origins correctly without trailing slashes
+function getCorsOrigin(request: Request): string {
+  const requestOrigin = request.headers.get('origin');
+  const configuredOrigin = Deno.env.get('ALLOWED_ORIGIN')?.trim().replace(/\/$/, '');
+
+  if (!configuredOrigin || configuredOrigin === '*') {
+    return requestOrigin ?? '*';
+  }
+
+  // Normalize incoming origin for matching
+  const cleanIncoming = requestOrigin?.trim().replace(/\/$/, '');
+  if (cleanIncoming === configuredOrigin) {
+    return requestOrigin!;
+  }
+
+  return configuredOrigin;
+}
+
+const json = (request: Request, body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), {
     status,
     headers: {
       'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': Deno.env.get('ALLOWED_ORIGIN') ?? '*',
+      'Access-Control-Allow-Origin': getCorsOrigin(request),
       'Access-Control-Allow-Headers': 'authorization, content-type, x-network-preference, x-payment, x-402-signature, x-bypass-payment, x-nonce, x-payer-address',
       'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Credentials': 'true',
       ...headers,
     },
   });
@@ -74,11 +93,19 @@ function decodePayload(text: string): string {
 }
 
 Deno.serve(async (request) => {
-  if (request.method === 'OPTIONS') return json({});
-  if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
+  // OPTIONS Preflight handling with proper headers
+  if (request.method === 'OPTIONS') {
+    return json(request, {}, 200);
+  }
+
+  if (request.method !== 'POST') {
+    return json(request, { error: 'Method not allowed' }, 405);
+  }
 
   const authorization = request.headers.get('Authorization');
-  if (!authorization) return json({ error: 'Authentication required' }, 401);
+  if (!authorization) {
+    return json(request, { error: 'Authentication required' }, 401);
+  }
 
   const clientHeaderNet = request.headers.get('x-network-preference')?.toLowerCase();
   const envNet = Deno.env.get('NETWORK_MODE')?.toLowerCase();
@@ -96,7 +123,7 @@ Deno.serve(async (request) => {
   const serviceRoleKey = (rawKey && rawKey !== 'null' && rawKey !== 'undefined') ? rawKey.trim() : null;
 
   if (!supabaseUrl || !serviceRoleKey) {
-    return json({ error: 'Server misconfigured: Database connection values resolved to null.' }, 500);
+    return json(request, { error: 'Server misconfigured: Database connection values resolved to null.' }, 500);
   }
 
   const admin = createClient(supabaseUrl, serviceRoleKey, {
@@ -114,7 +141,7 @@ Deno.serve(async (request) => {
   } else {
     const { data: { user }, error: authError } = await admin.auth.getUser(rawToken);
     if (authError || !user) {
-      return json({ error: 'Invalid session or token expired.' }, 401);
+      return json(request, { error: 'Invalid session or token expired.' }, 401);
     }
     userId = user.id;
   }
@@ -131,6 +158,7 @@ Deno.serve(async (request) => {
   if (!xPaymentHeader && !allowBypass) {
     const challengeNonce = crypto.randomUUID();
     return json(
+      request,
       {
         error: 'Payment Required',
         message: 'This API requires an x402 micropayment to process guardrail evaluation.',
@@ -159,11 +187,11 @@ Deno.serve(async (request) => {
     
     // In production, reject simulated signatures unless explicit bypass is enabled
     if (isSimulatedSig) {
-      return json({ error: 'Simulated signatures are only allowed in dev/sandbox mode.' }, 401);
+      return json(request, { error: 'Simulated signatures are only allowed in dev/sandbox mode.' }, 401);
     }
 
     if (!requestNonce) {
-      return json({ error: 'Missing x-nonce header required to verify payment signature.' }, 400);
+      return json(request, { error: 'Missing x-nonce header required to verify payment signature.' }, 400);
     }
 
     try {
@@ -191,7 +219,7 @@ Deno.serve(async (request) => {
         });
 
         if (!isValid) {
-          return json({ error: 'Invalid EIP-712 payment signature.' }, 401);
+          return json(request, { error: 'Invalid EIP-712 payment signature.' }, 401);
         }
         recoveredSignerAddress = claimedPayer;
       } else {
@@ -206,7 +234,7 @@ Deno.serve(async (request) => {
       }
     } catch (err) {
       console.error('Cryptographic signature verification failed:', err);
-      return json({ error: 'Cryptographic signature verification failed.' }, 401);
+      return json(request, { error: 'Cryptographic signature verification failed.' }, 401);
     }
   }
 
@@ -215,7 +243,7 @@ Deno.serve(async (request) => {
   // ---------------------------------------------------------------------------
   const { prompt } = await request.json().catch(() => ({}));
   if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 20_000) {
-    return json({ error: 'A prompt of 1–20,000 characters is required.' }, 400);
+    return json(request, { error: 'A prompt of 1–20,000 characters is required.' }, 400);
   }
 
   const startTime = Date.now();
@@ -354,7 +382,7 @@ Deno.serve(async (request) => {
     try {
       const databasePayload = {
         ...telemetryRecord,
-        developer_id: userId, // Binds the row to the authenticated developer
+        developer_id: userId,
         tx_hash: telemetryRecord.receipt.txHash,
         chain_id: telemetryRecord.receipt.chainId,
         network: telemetryRecord.receipt.network,
@@ -390,7 +418,7 @@ Deno.serve(async (request) => {
     setTimeout(saveTelemetry, 0);
   }
 
-  return json({
+  return json(request, {
     verdict,
     vectors,
     receipt: telemetryRecord.receipt,
