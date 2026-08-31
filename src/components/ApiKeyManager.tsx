@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Copy, KeyRound, Plus, ShieldCheck } from 'lucide-react';
 import { Panel } from './ui';
-import { API_KEYS_STORAGE_KEY, DEFAULT_SANDBOX_KEY, generateNewApiKey, getStoredApiKeys, type ApiKeyConfig } from '../config/keys';
+import { API_KEYS_STORAGE_KEY, generateNewApiKey, getStoredApiKeys, type ApiKeyConfig } from '../config/keys';
 
 export function ApiKeyManager() {
   const [keys, setKeys] = useState<ApiKeyConfig[]>([]);

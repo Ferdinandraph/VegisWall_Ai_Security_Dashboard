@@ -340,8 +340,6 @@ function App() {
                 events={security.events}
                 metrics={security.metrics}
                 configured={security.configured}
-                loading={security.loading}
-                error={security.error}
               />
             )}
           </div>

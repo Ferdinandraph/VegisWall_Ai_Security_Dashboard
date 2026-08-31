@@ -18,16 +18,25 @@ create table if not exists public.security_events (
   latency_ms numeric(10, 2)
 );
 
+-- The Edge Function writes this with the authenticated user's id.  Keep it
+-- nullable for a safe migration of existing installations; new events always
+-- include it.
+alter table public.security_events
+  add column if not exists developer_id uuid references auth.users(id);
+
 create index if not exists security_events_created_at_idx on public.security_events (created_at desc);
 create index if not exists security_events_agent_key_idx on public.security_events (agent_key);
 alter table public.security_events enable row level security;
 
--- ADJUSTMENT 1: Drop the old restrictive policy if it exists so we can replace it cleanly
+-- Each developer can only see their own prompts and telemetry.  The Edge
+-- Function uses the service-role key to insert events after authenticating the
+-- caller; never expose this stream to anon users.
 drop policy if exists "Authenticated analysts can read security events" on public.security_events;
+drop policy if exists "Anyone can read security events" on public.security_events;
 
--- ADJUSTMENT 2: Allow both 'anon' (unauthenticated guests) and 'authenticated' users to read
-create policy "Anyone can read security events"
-  on public.security_events for select to anon, authenticated using (true);
+create policy "Developers can read their own security events"
+  on public.security_events for select to authenticated
+  using (developer_id = auth.uid());
 
 alter table public.security_events replica identity full;
 alter publication supabase_realtime add table public.security_events;
@@ -37,11 +46,12 @@ returns table (total_revenue numeric, total_scans bigint, blocked_attacks bigint
 language sql stable security invoker set search_path = public
 as $$
   select coalesce(sum(fee_usdc), 0), count(*), count(*) filter (where verdict = 'ATTACK_SHIELDED'), avg(latency_ms)
-  from public.security_events;
+  from public.security_events
+  where developer_id = auth.uid();
 $$;
 
--- ADJUSTMENT 3: Grant execute permissions to 'anon' as well as 'authenticated'
-grant execute on function public.get_security_dashboard_metrics() to anon, authenticated;
+revoke execute on function public.get_security_dashboard_metrics() from anon;
+grant execute on function public.get_security_dashboard_metrics() to authenticated;
 
 create table if not exists public.developer_accounts (
   id uuid primary key default gen_random_uuid(),
@@ -54,8 +64,7 @@ create table if not exists public.developer_accounts (
 create index if not exists developer_accounts_email_idx on public.developer_accounts (email);
 alter table public.developer_accounts enable row level security;
 
-create policy "Anyone can create developer accounts"
-  on public.developer_accounts for insert to anon, authenticated with check (true);
-
-create policy "Anyone can read developer accounts"
-  on public.developer_accounts for select to anon, authenticated using (true);
+-- Authentication is managed by Supabase Auth.  This legacy table must not
+-- expose account records or accept browser-side password writes.
+drop policy if exists "Anyone can create developer accounts" on public.developer_accounts;
+drop policy if exists "Anyone can read developer accounts" on public.developer_accounts;

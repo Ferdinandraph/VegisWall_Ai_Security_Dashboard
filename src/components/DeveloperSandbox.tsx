@@ -204,6 +204,7 @@ export function DeveloperSandbox() {
           headers: {
             ...requestHeaders,
             'x-payment': simulatedSignature,
+            'x-nonce': challenge.nonce,
           },
           body: JSON.stringify({ prompt: text }),
         });

@@ -3,7 +3,7 @@ import type { DashboardMetrics, ThreatRow } from '../types/security';
 import { LineChart, DoughnutChart, BarChart } from './Charts';
 import { Panel, Eyebrow } from './ui';
 
-export function ThreatTelemetry({ events, metrics, configured, loading, error }: { events: ThreatRow[]; metrics: DashboardMetrics; configured: boolean; loading: boolean; error: string | null }) {
+export function ThreatTelemetry({ events, metrics, configured }: { events: ThreatRow[]; metrics: DashboardMetrics; configured: boolean }) {
   const totalEvents = metrics.totalScans;
   const totalBlocked = metrics.blockedAttacks;
   const latencies = events.map((event) => event.latencyMs).filter((value): value is number => value !== null);

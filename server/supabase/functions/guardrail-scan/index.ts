@@ -132,19 +132,11 @@ Deno.serve(async (request) => {
   });
 
   const rawToken = authorization.replace(/^Bearer\s+/i, '').trim().replace(/\r$/, '');
-  const envAnonKey = (Deno.env.get('VITE_SUPABASE_ANON_KEY') ?? Deno.env.get('SUPABASE_ANON_KEY') ?? '').toString().trim().replace(/\r$/, '');
-
-  let userId = '00000000-0000-0000-0000-000000000000';
-
-  if (envAnonKey && rawToken === envAnonKey) {
-    // Development / UI Sandbox Testing Bypass
-  } else {
-    const { data: { user }, error: authError } = await admin.auth.getUser(rawToken);
-    if (authError || !user) {
-      return json(request, { error: 'Invalid session or token expired.' }, 401);
-    }
-    userId = user.id;
+  const { data: { user }, error: authError } = await admin.auth.getUser(rawToken);
+  if (authError || !user) {
+    return json(request, { error: 'A valid developer session is required.' }, 401);
   }
+  const userId = user.id;
 
   // ---------------------------------------------------------------------------
   // STEP 1: x402 Micropayment Protocol Check
@@ -152,7 +144,11 @@ Deno.serve(async (request) => {
   const xPaymentHeader = request.headers.get('x-payment') || request.headers.get('x-402-signature');
   const requestNonce = request.headers.get('x-nonce');
   const claimedPayer = request.headers.get('x-payer-address');
-  const allowBypass = request.headers.get('x-bypass-payment') === 'true' || rawToken === envAnonKey;
+  // Browser headers are untrusted.  A bypass is available only when explicitly
+  // enabled as an Edge Function secret for a non-production sandbox.
+  const allowBypass =
+    Deno.env.get('ALLOW_DEVELOPMENT_BYPASS') === 'true' &&
+    request.headers.get('x-bypass-payment') === 'true';
 
   // Challenge issuing if no payment header is provided and bypass is not explicitly allowed
   if (!xPaymentHeader && !allowBypass) {
@@ -334,7 +330,10 @@ Deno.serve(async (request) => {
       }
     }
   } catch (err) {
-    console.error('Guardrail check failed, default to bypass rules:', err);
+    // A scanner outage must not silently permit a prompt to proceed.
+    console.error('Guardrail check failed; blocking request:', err);
+    verdict = 'ATTACK_SHIELDED';
+    vectors.systemOverride = 1;
   }
 
   // ---------------------------------------------------------------------------
@@ -383,20 +382,6 @@ Deno.serve(async (request) => {
       const databasePayload = {
         ...telemetryRecord,
         developer_id: userId,
-        tx_hash: telemetryRecord.receipt.txHash,
-        chain_id: telemetryRecord.receipt.chainId,
-        network: telemetryRecord.receipt.network,
-        settlement_status: telemetryRecord.receipt.settlementStatus,
-        signature: telemetryRecord.receipt.signature,
-        payer: telemetryRecord.receipt.payer,
-        payee: telemetryRecord.receipt.payee,
-        amount: telemetryRecord.receipt.amount,
-        token: telemetryRecord.receipt.token,
-        block_number: telemetryRecord.receipt.blockNumber,
-        gas_used: telemetryRecord.receipt.gasUsed,
-        timestamp: telemetryRecord.receipt.timestamp,
-        challenge_nonce: telemetryRecord.receipt.challengeNonce,
-        scheme: telemetryRecord.receipt.scheme
       };
 
       const { error } = await admin
